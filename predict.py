@@ -1,18 +1,14 @@
 """
-predict.py
-Inference Script: Detect and Classify Road Damages on Images and Videos.
-
-Author: Ravish Patel
-Project: Road Damage Detection PBL
+Run inference on single images, videos, or directories of road photos.
+Outputs annotated detection visualizations and logs summary statistics.
 """
 
 import os
 import argparse
 from ultralytics import YOLO
 
-
-# Friendly labels for reporting
-FRIENDLY_NAMES = {
+# Display names for terminal summary
+CLASS_LABELS = {
     "D00_Longitudinal_Crack": "Longitudinal Crack",
     "D10_Transverse_Crack": "Transverse Crack",
     "D20_Alligator_Crack": "Alligator (Fatigue) Crack",
@@ -20,45 +16,35 @@ FRIENDLY_NAMES = {
 }
 
 
-def assess_damage_severity(detection_counts):
+def evaluate_severity(counts):
     """
-    Simple severity heuristic for road maintenance:
-    - High: Potholes present (immediate hazard) or multiple alligator cracks.
-    - Medium: Longitudinal or Transverse cracks present.
-    - Low / Good: No significant structural damages detected.
+    Categorizes pavement condition based on detected distresses:
+    - High: Any pothole (D40) or multiple structural fatigue cracks (D20).
+    - Medium: Longitudinal or transverse cracks requiring joint resealing.
+    - Low/Normal: Minor or no structural defects detected.
     """
-    potholes = detection_counts.get("D40_Pothole", 0)
-    alligators = detection_counts.get("D20_Alligator_Crack", 0)
-    cracks = detection_counts.get("D00_Longitudinal_Crack", 0) + detection_counts.get("D10_Transverse_Crack", 0)
+    potholes = counts.get("D40_Pothole", 0)
+    alligators = counts.get("D20_Alligator_Crack", 0)
+    cracks = counts.get("D00_Longitudinal_Crack", 0) + counts.get("D10_Transverse_Crack", 0)
 
     if potholes > 0 or alligators >= 2:
-        return "HIGH - Immediate repair required (potholes/severe fatigue)"
+        return "HIGH - Immediate repair required (pothole or severe fatigue)"
     elif alligators > 0 or cracks >= 2:
         return "MEDIUM - Surface resealing and crack filling needed"
     elif cracks > 0:
-        return "LOW - Minor crack monitoring"
-    else:
-        return "NORMAL - Road surface in acceptable condition"
+        return "LOW - Minor surface distress monitoring"
+    return "NORMAL - Pavement in acceptable condition"
 
 
 def run_inference(source="demo_samples", weights="models/best.pt", conf=0.25, save_dir="results/predictions"):
-    """
-    Runs YOLOv8 object detection on images or videos.
-    """
     if not os.path.exists(weights):
-        # If models/best.pt is not trained yet, fall back to yolov8n.pt for testing
-        print(f"[!] Custom weights '{weights}' not found.")
-        print("[*] Falling back to default 'yolov8n.pt' for code verification.")
-        weights = "yolov8n.pt"
+        raise FileNotFoundError(
+            f"Model checkpoint '{weights}' not found. Please train the model with train.py "
+            f"or specify an existing weights path using --weights."
+        )
 
-    print("=" * 60)
-    print("ROAD DAMAGE DETECTION - INFERENCE")
-    print("=" * 60)
-    print(f"Source       : {source}")
-    print(f"Model        : {weights}")
-    print(f"Confidence   : {conf}")
-    print(f"Save Path    : {save_dir}")
-    print("=" * 60)
+    print(f"Loading weights from: {weights}")
+    print(f"Running inference on: {source} (conf >= {conf})")
 
     model = YOLO(weights)
     results = model.predict(
@@ -70,32 +56,32 @@ def run_inference(source="demo_samples", weights="models/best.pt", conf=0.25, sa
         exist_ok=True
     )
 
-    print("\n[+] Detection Summary:")
-    for idx, r in enumerate(results):
+    print("\n--- Detection Summary ---")
+    for r in results:
         img_name = os.path.basename(r.path)
         counts = {}
         for box in r.boxes:
             cls_id = int(box.cls[0])
-            cls_name = model.names[cls_id]
-            counts[cls_name] = counts.get(cls_name, 0) + 1
+            name = model.names.get(cls_id, f"Class_{cls_id}")
+            counts[name] = counts.get(name, 0) + 1
 
-        severity = assess_damage_severity(counts)
-        print(f"\nImage: {img_name}")
+        status = evaluate_severity(counts)
+        print(f"\n{img_name}:")
         if counts:
             for cname, ccount in counts.items():
-                friendly = FRIENDLY_NAMES.get(cname, cname)
-                print(f"  • {friendly}: {ccount}")
-            print(f"  --> Severity Status: {severity}")
+                label = CLASS_LABELS.get(cname, cname)
+                print(f"  - {label}: {ccount}")
+            print(f"  Condition: {status}")
         else:
-            print("  • No road damage detected.")
+            print("  - No distresses detected.")
 
-    print(f"\n[✓] Visualized prediction images saved to '{save_dir}'")
+    print(f"\nSaved labeled detection images to: {save_dir}")
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Run Road Damage Detection Inference")
+    parser = argparse.ArgumentParser(description="Road Damage Detection CLI Inference")
     parser.add_argument("--source", type=str, default="demo_samples", help="Path to image, video, or folder")
-    parser.add_argument("--weights", type=str, default="models/best.pt", help="Path to model weights")
+    parser.add_argument("--weights", type=str, default="models/best.pt", help="Path to trained weights")
     parser.add_argument("--conf", type=float, default=0.25, help="Confidence threshold")
 
     args = parser.parse_args()
