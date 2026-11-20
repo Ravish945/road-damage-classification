@@ -30,7 +30,7 @@ We used the Indian road condition dataset from the **Global Road Damage Detectio
 
 ## Results & Performance
 
-Trained for 50 epochs on Google Colab GPU using `yolov8n.pt` as the pre-trained backbone.
+Trained for 25 epochs on Google Colab (Tesla T4 GPU) using `yolov8n.pt` as the pre-trained backbone.
 
 ### Per-Class Evaluation Metrics (Validation Set)
 

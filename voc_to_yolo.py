@@ -1,23 +1,18 @@
-"""
-Dataset preparation: converts Pascal VOC XML bounding box annotations to normalized YOLO format.
-Organizes images and label files into train and validation splits, generating data.yaml.
-"""
-
 import os
 import glob
 import random
 import shutil
 import xml.etree.ElementTree as ET
+import argparse
 
-# Road Damage Detection (RDD) India Class Mapping
-# Grouping minor sub-classes (D01 -> D00, D11 -> D10) to strengthen sample support
-CLASS_MAPPING = {
-    'D00': 0,
-    'D01': 0,   # Grouped with longitudinal cracks (wheel path / joint)
-    'D10': 1,
-    'D11': 1,   # Grouped with transverse cracks
-    'D20': 2,   # Alligator crack
-    'D40': 3,   # Pothole / rutting
+# Converts RDD India Pascal VOC XML annotations to YOLO format.
+# Also splits data into train/val and generates data.yaml.
+
+CLASS_MAP = {
+    'D00': 0, 'D01': 0,  # Longitudinal crack
+    'D10': 1, 'D11': 1,  # Transverse crack
+    'D20': 2,            # Alligator crack
+    'D40': 3             # Pothole
 }
 
 CLASS_NAMES = [
@@ -28,111 +23,62 @@ CLASS_NAMES = [
 ]
 
 
-def resolve_dataset_directories(base_dir="."):
-    """Finds raw training images and XML annotations across Colab or local setups."""
-    candidates = [
-        (os.path.join(base_dir, "raw_data", "India", "train"), "Google Drive / raw_data structure"),
-        (os.path.join(base_dir, "train"), "Local project root structure")
-    ]
-    for path, desc in candidates:
-        img_dir = os.path.join(path, "images")
-        xml_dir = os.path.join(path, "annotations", "xmls")
-        if os.path.isdir(img_dir) and os.path.isdir(xml_dir):
-            return img_dir, xml_dir
-
-    raise FileNotFoundError(
-        "Could not locate training images and XML annotations. "
-        "Expected 'train/images' and 'train/annotations/xmls' in either './' or 'raw_data/India/'."
-    )
-
-
-def voc_to_yolo_bbox(img_w, img_h, xmin, xmax, ymin, ymax):
-    """
-    Converts absolute pixel coordinates to normalized center-based coordinates (0.0 to 1.0).
-    """
-    x_center = ((xmin + xmax) / 2.0) / img_w
-    y_center = ((ymin + ymax) / 2.0) / img_h
-    w = (xmax - xmin) / img_w
-    h = (ymax - ymin) / img_h
-
-    # Clip to [0, 1] range to safeguard against boundary annotations
-    return (
-        max(0.0, min(1.0, x_center)),
-        max(0.0, min(1.0, y_center)),
-        max(0.0, min(1.0, w)),
-        max(0.0, min(1.0, h))
-    )
-
-
-def parse_xml_file(xml_path):
-    """Extracts image dimensions and valid damage bounding boxes from a VOC XML file."""
+def parse_xml(xml_path):
     try:
-        tree = ET.parse(xml_path)
-        root = tree.getroot()
+        root = ET.parse(xml_path).getroot()
+        size = root.find('size')
+        if size is None:
+            return None, []
+        w = int(size.find('width').text)
+        h = int(size.find('height').text)
+        if w <= 0 or h <= 0:
+            return None, []
+
+        boxes = []
+        for obj in root.findall('object'):
+            label = obj.find('name').text.strip() if obj.find('name') is not None else ""
+            if label not in CLASS_MAP:
+                continue
+
+            bnd = obj.find('bndbox')
+            if bnd is None:
+                continue
+
+            xmin = float(bnd.find('xmin').text)
+            xmax = float(bnd.find('xmax').text)
+            ymin = float(bnd.find('ymin').text)
+            ymax = float(bnd.find('ymax').text)
+
+            if xmax <= xmin or ymax <= ymin:
+                continue
+
+            # Normalized YOLO coordinates (center x, center y, width, height)
+            cx = max(0.0, min(1.0, ((xmin + xmax) / 2.0) / w))
+            cy = max(0.0, min(1.0, ((ymin + ymax) / 2.0) / h))
+            bw = max(0.0, min(1.0, (xmax - xmin) / w))
+            bh = max(0.0, min(1.0, (ymax - ymin) / h))
+
+            boxes.append((CLASS_MAP[label], (cx, cy, bw, bh)))
+
+        return (w, h), boxes
     except Exception:
         return None, []
 
-    size_elem = root.find('size')
-    if size_elem is None:
-        return None, []
 
-    width = int(size_elem.find('width').text)
-    height = int(size_elem.find('height').text)
-    if width <= 0 or height <= 0:
-        return None, []
-
-    boxes = []
-    for obj in root.findall('object'):
-        name_elem = obj.find('name')
-        if name_elem is None or not name_elem.text:
-            continue
-
-        raw_label = name_elem.text.strip()
-        if raw_label not in CLASS_MAPPING:
-            continue
-
-        cid = CLASS_MAPPING[raw_label]
-        bndbox = obj.find('bndbox')
-        if bndbox is None:
-            continue
-
-        xmin = float(bndbox.find('xmin').text)
-        xmax = float(bndbox.find('xmax').text)
-        ymin = float(bndbox.find('ymin').text)
-        ymax = float(bndbox.find('ymax').text)
-
-        if xmax <= xmin or ymax <= ymin:
-            continue
-
-        norm_box = voc_to_yolo_bbox(width, height, xmin, xmax, ymin, ymax)
-        boxes.append((cid, norm_box))
-
-    return (width, height), boxes
-
-
-def split_samples(samples, split_ratio=0.8, strategy="chunk", chunk_size=50, seed=42):
-    """
-    Splits dataset into train and validation sets.
-    - 'chunk' (recommended): Splits sequential video frames in contiguous blocks (e.g. 50 frames).
-      This prevents adjacent frames from the same road section leaking into both train and validation splits.
-    - 'random': Standard random shuffle.
-    """
+def split_data(samples, split_ratio=0.8, strategy="chunk", chunk_size=50, seed=42):
+    # Chunk splitting keeps consecutive video frames together so we don't leak train frames into val
     if strategy == "chunk":
-        # Group samples in blocks to respect temporal video continuity
         chunks = [samples[i:i + chunk_size] for i in range(0, len(samples), chunk_size)]
         random.seed(seed)
         random.shuffle(chunks)
 
         train_set, val_set = [], []
-        target_train_count = int(len(samples) * split_ratio)
-        current_count = 0
-
-        for ch in chunks:
-            if current_count + len(ch) <= target_train_count:
-                train_set.extend(ch)
-                current_count += len(ch)
+        target = int(len(samples) * split_ratio)
+        for c in chunks:
+            if len(train_set) + len(c) <= target:
+                train_set.extend(c)
             else:
-                val_set.extend(ch)
+                val_set.extend(c)
         return train_set, val_set
     else:
         random.seed(seed)
@@ -142,101 +88,103 @@ def split_samples(samples, split_ratio=0.8, strategy="chunk", chunk_size=50, see
         return shuffled[:idx], shuffled[idx:]
 
 
-def process_dataset(base_dir=".", output_dir="dataset", split_ratio=0.8, split_strategy="chunk", max_samples=None):
-    img_dir, xml_dir = resolve_dataset_directories(base_dir)
-    print(f"Reading images from: {img_dir}")
-    print(f"Reading XML annotations from: {xml_dir}")
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--base_dir", default=".", help="project base path")
+    parser.add_argument("--output_dir", default="dataset", help="where to save yolo dataset")
+    parser.add_argument("--split", type=float, default=0.8, help="train split ratio")
+    parser.add_argument("--split_strategy", default="chunk", choices=["chunk", "random"])
+    parser.add_argument("--sample", type=int, default=None)
+    args = parser.parse_args()
 
-    # Create destination directories
-    train_img_dir = os.path.join(output_dir, "images", "train")
-    val_img_dir = os.path.join(output_dir, "images", "val")
-    train_lbl_dir = os.path.join(output_dir, "labels", "train")
-    val_lbl_dir = os.path.join(output_dir, "labels", "val")
+    # Look for train images and xmls in common paths
+    candidates = [
+        (os.path.join(args.base_dir, "raw_data", "India", "train")),
+        (os.path.join(args.base_dir, "train"))
+    ]
+    img_dir, xml_dir = None, None
+    for p in candidates:
+        i_dir = os.path.join(p, "images")
+        x_dir = os.path.join(p, "annotations", "xmls")
+        if os.path.isdir(i_dir) and os.path.isdir(x_dir):
+            img_dir, xml_dir = i_dir, x_dir
+            break
 
-    for d in [train_img_dir, val_img_dir, train_lbl_dir, val_lbl_dir]:
-        os.makedirs(d, exist_ok=True)
+    if not img_dir:
+        print("Error: Could not find train/images and train/annotations/xmls folders")
+        return
+
+    print(f"Reading images from {img_dir}")
+    print(f"Reading annotations from {xml_dir}")
+
+    # Create YOLO folder structure
+    for split in ["train", "val"]:
+        os.makedirs(os.path.join(args.output_dir, "images", split), exist_ok=True)
+        os.makedirs(os.path.join(args.output_dir, "labels", split), exist_ok=True)
 
     xml_files = sorted(glob.glob(os.path.join(xml_dir, "*.xml")))
-    print(f"Found {len(xml_files)} annotation files.")
+    print(f"Found {len(xml_files)} annotation files")
 
     samples = []
-    class_tallies = {name: 0 for name in CLASS_NAMES}
+    counts = {name: 0 for name in CLASS_NAMES}
 
-    for xml_path in xml_files:
-        base_name = os.path.splitext(os.path.basename(xml_path))[0]
-        img_path = os.path.join(img_dir, base_name + ".jpg")
+    for x_path in xml_files:
+        name = os.path.splitext(os.path.basename(x_path))[0]
+        img_path = os.path.join(img_dir, name + ".jpg")
         if not os.path.exists(img_path):
             continue
 
-        size, boxes = parse_xml_file(xml_path)
+        size, boxes = parse_xml(x_path)
         if size is None:
             continue
 
-        # Retain all images: damaged frames as positive samples,
-        # and undamaged frames as negative background samples (empty txt) to minimize false positives.
-        samples.append((img_path, base_name, boxes))
-
+        # Keep both damaged and clean images (empty txt file = negative background sample)
+        samples.append((img_path, name, boxes))
         for cid, _ in boxes:
-            class_tallies[CLASS_NAMES[cid]] += 1
+            counts[CLASS_NAMES[cid]] += 1
 
-    print("\nAnnotation Instance Counts:")
-    for name, cnt in class_tallies.items():
-        print(f"  {name:<25}: {cnt}")
+    print("\nClass counts in dataset:")
+    for k, v in counts.items():
+        print(f"  {k}: {v}")
 
-    if max_samples and max_samples < len(samples):
-        samples = samples[:max_samples]
-        print(f"Limited run: processing {max_samples} samples.")
+    if args.sample and args.sample < len(samples):
+        samples = samples[:args.sample]
 
-    train_data, val_data = split_samples(samples, split_ratio=split_ratio, strategy=split_strategy)
-    print(f"\nSplit strategy '{split_strategy}': {len(train_data)} train images, {len(val_data)} validation images.")
+    train_data, val_data = split_data(samples, args.split, args.split_strategy)
+    print(f"\nSplit ({args.split_strategy}): {len(train_data)} train images, {len(val_data)} val images")
 
-    def write_split(dataset, out_img_dir, out_lbl_dir, name):
-        print(f"Exporting {name} split ({len(dataset)} items)...")
-        for i, (src_img, bname, bboxes) in enumerate(dataset):
-            dst_img = os.path.join(out_img_dir, bname + ".jpg")
+    def save_split(dataset, split_name):
+        img_out = os.path.join(args.output_dir, "images", split_name)
+        lbl_out = os.path.join(args.output_dir, "labels", split_name)
+        for src_img, bname, boxes in dataset:
+            dst_img = os.path.join(img_out, bname + ".jpg")
             if not os.path.exists(dst_img):
                 shutil.copy(src_img, dst_img)
 
-            # Write YOLO label file (empty if undamaged background sample)
-            dst_lbl = os.path.join(out_lbl_dir, bname + ".txt")
+            # Write label file (empty for undamaged images)
+            dst_lbl = os.path.join(lbl_out, bname + ".txt")
             with open(dst_lbl, "w") as f:
-                for cid, (x, y, w, h) in bboxes:
+                for cid, (x, y, w, h) in boxes:
                     f.write(f"{cid} {x:.6f} {y:.6f} {w:.6f} {h:.6f}\n")
 
-    write_split(train_data, train_img_dir, train_lbl_dir, "Train")
-    write_split(val_data, val_img_dir, val_lbl_dir, "Validation")
+    print("Writing files...")
+    save_split(train_data, "train")
+    save_split(val_data, "val")
 
-    yaml_path = os.path.join(base_dir, "data.yaml")
-    abs_out = os.path.abspath(output_dir)
+    # Generate data.yaml
+    yaml_path = os.path.join(args.base_dir, "data.yaml")
+    abs_out = os.path.abspath(args.output_dir)
     with open(yaml_path, "w") as f:
-        f.write("# YOLOv8 Dataset Configuration - Road Damage Detection (India)\n")
         f.write(f"path: {abs_out}\n")
         f.write("train: images/train\n")
         f.write("val: images/val\n\n")
         f.write(f"nc: {len(CLASS_NAMES)}\n")
         f.write("names:\n")
-        for idx, name in enumerate(CLASS_NAMES):
-            f.write(f"  {idx}: {name}\n")
+        for i, name in enumerate(CLASS_NAMES):
+            f.write(f"  {i}: {name}\n")
 
-    print(f"\nConfiguration file written to: {yaml_path}")
-    print(f"Dataset successfully staged in '{output_dir}/'")
+    print(f"Done! Created dataset in '{args.output_dir}/' and saved '{yaml_path}'")
 
 
 if __name__ == "__main__":
-    import argparse
-    parser = argparse.ArgumentParser(description="Convert VOC XML to YOLO format with leakage prevention")
-    parser.add_argument("--base_dir", type=str, default=".", help="Project base path containing train/ or raw_data/")
-    parser.add_argument("--output_dir", type=str, default="dataset", help="Output path for YOLO dataset")
-    parser.add_argument("--split", type=float, default=0.8, help="Train/val ratio (default: 0.8)")
-    parser.add_argument("--split_strategy", type=str, default="chunk", choices=["chunk", "random"],
-                        help="Splitting strategy: 'chunk' blocks sequential video frames to avoid leakage")
-    parser.add_argument("--sample", type=int, default=None, help="Process limited sample count for quick tests")
-
-    args = parser.parse_args()
-    process_dataset(
-        base_dir=args.base_dir,
-        output_dir=args.output_dir,
-        split_ratio=args.split,
-        split_strategy=args.split_strategy,
-        max_samples=args.sample
-    )
+    main()
