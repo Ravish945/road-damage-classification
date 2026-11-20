@@ -1,98 +1,233 @@
 import os
 import glob
 import csv
+import time
 from datetime import datetime
 from PIL import Image
+import pandas as pd
 import streamlit as st
 from ultralytics import YOLO
 
-st.set_page_config(page_title="Road Damage Detection", page_icon="🛣️")
+# Page Configuration
+st.set_page_config(
+    page_title="Road Damage Detection & Triage",
+    page_icon="🛣️",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
 
-st.title("Road Damage Detection & Severity Triage")
-st.write("Upload a road photo or pick a sample image to detect potholes and cracks using YOLOv8.")
+# Custom Styling
+st.markdown("""
+<style>
+    .main-header {
+        font-size: 2.2rem;
+        font-weight: 700;
+        margin-bottom: 0.2rem;
+    }
+    .sub-header {
+        font-size: 1.05rem;
+        color: #9aa0a6;
+        margin-bottom: 1.5rem;
+    }
+    .metric-card {
+        background-color: rgba(255, 255, 255, 0.05);
+        border: 1px solid rgba(255, 255, 255, 0.1);
+        border-radius: 8px;
+        padding: 12px 16px;
+        text-align: center;
+    }
+    .stButton>button {
+        width: 100%;
+        border-radius: 6px;
+        font-weight: 600;
+        padding: 0.5rem 1rem;
+    }
+</style>
+""", unsafe_allow_html=True)
 
-# Sidebar settings
-st.sidebar.header("Settings")
-model_path = st.sidebar.text_input("Model weights", "models/best.pt")
-conf_thresh = st.sidebar.slider("Confidence threshold", 0.1, 0.9, 0.25, 0.05)
-st.sidebar.caption("Recommended: 0.25 for balanced detection")
+# Sidebar Controls
+st.sidebar.title("⚙️ Inspection Settings")
+model_path = st.sidebar.text_input("Model Checkpoint", "models/best.pt")
+conf_thresh = st.sidebar.slider("Confidence Threshold", 0.10, 0.90, 0.25, 0.05)
+st.sidebar.caption("📌 Recommended: 0.25 for standard YOLOv8 detection")
 
-# Load model with proper Streamlit caching
+st.sidebar.markdown("---")
+st.sidebar.markdown("### 🏷️ Target Classes")
+st.sidebar.markdown("""
+- **D00**: Longitudinal Crack
+- **D10**: Transverse Crack
+- **D20**: Alligator (Fatigue) Crack
+- **D40**: Pothole / Rutting
+""")
+
+st.sidebar.markdown("---")
+st.sidebar.markdown("**Project:** PBL - Indian Road Distress AI  \n**Author:** Ravish Patel")
+
+# Load model with caching
 @st.cache_resource
-def get_model(path):
+def load_yolo(path):
     if not os.path.exists(path):
         return None
     return YOLO(path)
 
-model = get_model(model_path)
+model = load_yolo(model_path)
 if model is None:
-    st.error(f"Could not find model weights at `{model_path}`. Please run `python train.py` first.")
+    st.error(f"Model file `{model_path}` not found. Please train first or place weights in models/.")
     st.stop()
 
-# Input source: upload or sample
-source_type = st.radio("Choose input:", ["Demo Sample", "Upload Image"], horizontal=True)
+# Header
+st.markdown('<div class="main-header">🛣️ Road Damage Detection & Severity Triage</div>', unsafe_allow_html=True)
+st.markdown('<div class="sub-header">Automated computer vision inspection on Indian roads using YOLOv8 with real-time maintenance priority classification</div>', unsafe_allow_html=True)
 
-image = None
-image_name = "test.jpg"
+# Navigation Tabs
+tab_inspect, tab_metrics, tab_logs = st.tabs(["🔍 Inspection Studio", "📊 Model Performance & Curves", "📋 Inspection Log"])
 
-if source_type == "Demo Sample":
-    sample_files = sorted(glob.glob("demo_samples/*.jpg"))
-    if sample_files:
-        options = [os.path.basename(f) for f in sample_files]
-        default_idx = options.index("India_000389.jpg") if "India_000389.jpg" in options else 0
-        chosen = st.selectbox("Select sample image:", options, index=default_idx)
-        image_path = os.path.join("demo_samples", chosen)
-        image = Image.open(image_path)
-        image_name = chosen
-    else:
-        st.warning("No images found in demo_samples folder.")
-else:
-    uploaded = st.file_uploader("Upload road image", type=["jpg", "jpeg", "png"])
-    if uploaded:
-        image = Image.open(uploaded)
-        image_name = uploaded.name
+with tab_inspect:
+    col_input, col_output = st.columns([1, 1], gap="large")
 
-# Run detection
-if image is not None:
-    col1, col2 = st.columns(2)
-    with col1:
-        st.subheader("Input")
-        st.image(image, use_container_width=True)
+    with col_input:
+        st.subheader("1. Select or Upload Image")
+        source = st.radio("Input Source", ["Demo Samples (Verified Damages)", "Upload Custom Photo"], horizontal=True, label_visibility="collapsed")
 
-    with col2:
-        st.subheader("Detection")
-        if st.button("Run Detection", type="primary"):
-            with st.spinner("Detecting..."):
-                results = model.predict(image, conf=conf_thresh, save=False)[0]
+        image = None
+        img_name = "test.jpg"
+
+        if "Demo Samples" in source:
+            sample_files = sorted(glob.glob("demo_samples/*.jpg"))
+            if sample_files:
+                options = [os.path.basename(f) for f in sample_files]
+                default_idx = options.index("India_000389.jpg") if "India_000389.jpg" in options else 0
+                chosen = st.selectbox("Pick a demo photo:", options, index=default_idx)
+                image_path = os.path.join("demo_samples", chosen)
+                image = Image.open(image_path)
+                img_name = chosen
+            else:
+                st.warning("No sample images in demo_samples/")
+        else:
+            uploaded = st.file_uploader("Upload road image", type=["jpg", "jpeg", "png"])
+            st.caption("💡 Best with driver-view or dashcam road photos. Extreme ground-level macro angles or flooded rain puddles may cause domain shift.")
+            if uploaded:
+                image = Image.open(uploaded)
+                img_name = uploaded.name
+
+        if image is not None:
+            st.image(image, caption=f"Input: {img_name}", use_container_width=True)
+            run_btn = st.button("🚀 Run AI Road Inspection", type="primary")
+        else:
+            run_btn = False
+
+    with col_output:
+        st.subheader("2. AI Analysis & Severity Triage")
+
+        if image is not None and run_btn:
+            with st.spinner("Analyzing road surface..."):
+                t_start = time.time()
+                results = model.predict(image, conf=conf_thresh, imgsz=640, verbose=False)[0]
+                latency_ms = (time.time() - t_start) * 1000
+
+                # Render annotated bounding boxes
                 annotated = Image.fromarray(results.plot()[..., ::-1])
-                st.image(annotated, use_container_width=True)
+                st.image(annotated, caption="YOLOv8 Detection Output", use_container_width=True)
 
-                # Count detections per class
+                # Aggregate detection statistics
                 counts = {}
                 for box in results.boxes:
                     cls_id = int(box.cls[0])
-                    name = model.names.get(cls_id, f"Class {cls_id}")
+                    name = model.names.get(cls_id, f"Class_{cls_id}")
                     counts[name] = counts.get(name, 0) + 1
 
-                # Severity logic based on defects
                 potholes = counts.get("D40_Pothole", 0)
                 alligators = counts.get("D20_Alligator_Crack", 0)
+                cracks = counts.get("D00_Longitudinal_Crack", 0) + counts.get("D10_Transverse_Crack", 0)
+                total_defects = sum(counts.values())
 
+                # Quick Metric Cards
+                m1, m2, m3 = st.columns(3)
+                with m1:
+                    if potholes > 0 or alligators >= 2:
+                        st.error(f"🔴 CRITICAL\n{potholes} Pothole(s)")
+                    elif counts:
+                        st.warning(f"🟡 MODERATE\n{total_defects} Surface Crack(s)")
+                    else:
+                        st.success("🟢 GOOD\nNo Defects")
+
+                with m2:
+                    st.metric("Total Distresses", f"{total_defects} found")
+
+                with m3:
+                    st.metric("Inference Latency", f"{latency_ms:.1f} ms", f"{1000/max(1, latency_ms):.0f} FPS")
+
+                # Actionable Maintenance Recommendation
                 if potholes > 0 or alligators >= 2:
-                    st.error(f"Severity: CRITICAL ({potholes} potholes, {alligators} alligator cracks) - immediate repair recommended")
+                    st.error(
+                        f"**Urgent Maintenance Required:** {potholes} pothole(s) and {alligators} alligator crack(s) detected. "
+                        "High risk of vehicle tire blowout or suspension damage. Immediate asphalt patching team dispatch recommended."
+                    )
                 elif counts:
-                    st.warning("Severity: MODERATE - surface cracks detected, schedule for resealing")
+                    st.warning(
+                        "**Preventive Maintenance Required:** Surface cracks detected. "
+                        "Schedule joint sealing and crack filling before the monsoon season to prevent water percolation into the sub-base."
+                    )
                 else:
-                    st.success("Severity: GOOD - no road damages detected")
+                    st.success("**Pavement in Good Condition:** No structural distresses detected above threshold. Road is within standard safety limits.")
 
-                # Show breakdown
+                # Breakdown Table
                 if counts:
-                    st.write("**Detected damages:**")
-                    for k, v in counts.items():
-                        st.write(f"- {k}: {v}")
+                    st.markdown("#### Detailed Breakdown:")
+                    b_cols = st.columns(len(counts))
+                    for i, (k, v) in enumerate(counts.items()):
+                        with b_cols[i]:
+                            st.info(f"**{k}**: {v}")
 
-                    # Append to inspection log
-                    os.makedirs("results", exist_ok=True)
-                    with open("results/inspection_log.csv", "a", newline="") as f:
-                        writer = csv.writer(f)
-                        writer.writerow([datetime.now().strftime("%Y-%m-%d %H:%M:%S"), image_name, counts])
+                # Save to inspection CSV log
+                os.makedirs("results", exist_ok=True)
+                with open("results/inspection_log.csv", "a", newline="") as f:
+                    writer = csv.writer(f)
+                    writer.writerow([
+                        datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        img_name,
+                        f"{latency_ms:.1f}ms",
+                        total_defects,
+                        potholes,
+                        dict(counts)
+                    ])
+        else:
+            st.info("👈 Select or upload an image and click **Run AI Road Inspection** to see detections, bounding boxes, and maintenance severity triage.")
+
+
+with tab_metrics:
+    st.subheader("Model Validation & Training Benchmark")
+    st.write("Quantitative results trained for 25 epochs on Google Colab (Tesla T4 GPU) on Sekilab RDD2020 India Dataset.")
+
+    col_m1, col_m2 = st.columns(2)
+    with col_m1:
+        cm_path = "results/screenshots/confusion_matrix.png"
+        if os.path.exists(cm_path):
+            st.image(cm_path, caption="Validation Confusion Matrix", use_container_width=True)
+    with col_m2:
+        pr_path = "results/screenshots/BoxPR_curve.png"
+        if os.path.exists(pr_path):
+            st.image(pr_path, caption="Precision-Recall Curve (mAP@0.50 = 0.515)", use_container_width=True)
+
+    res_path = "results/screenshots/results.png"
+    if os.path.exists(res_path):
+        st.image(res_path, caption="Training Loss Curves & Convergence", use_container_width=True)
+
+
+with tab_logs:
+    st.subheader("Inspection History Log")
+    log_file = "results/inspection_log.csv"
+    if os.path.exists(log_file) and os.path.getsize(log_file) > 0:
+        try:
+            df = pd.read_csv(log_file, names=["Timestamp", "Image Name", "Latency", "Total Defects", "Potholes", "Details"])
+            st.dataframe(df, use_container_width=True)
+            st.download_button(
+                "📥 Download Inspection Log (CSV)",
+                data=open(log_file).read(),
+                file_name="road_inspection_log.csv",
+                mime="text/csv"
+            )
+        except Exception:
+            st.write("Could not parse inspection log.")
+    else:
+        st.write("No inspections logged yet. Run a detection in the **Inspection Studio** tab to populate the log.")
