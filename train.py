@@ -1,96 +1,66 @@
-"""
-Training pipeline for YOLOv8 Road Damage Detection on Indian road conditions.
-Supports MPS (Apple Silicon), CUDA (NVIDIA GPU), and CPU compute devices.
-"""
-
 import os
 import shutil
 import argparse
 import torch
 from ultralytics import YOLO
 
+# Road Damage Detection Training using YOLOv8
+# Trained on RDD2020 India dataset (D00, D10, D20, D40)
 
-def detect_best_device():
-    """Selects the best available accelerator."""
-    if torch.cuda.is_available():
-        print(f"Using NVIDIA CUDA GPU: {torch.cuda.get_device_name(0)}")
-        return 'cuda'
-    elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
-        print("Using Apple Silicon MPS acceleration.")
-        return 'mps'
-    print("No hardware accelerator found. Running on CPU.")
-    return 'cpu'
+def main():
+    parser = argparse.ArgumentParser(description="Train YOLOv8 on Road Damage Dataset")
+    parser.add_argument("--data", default="data.yaml", help="Path to data.yaml")
+    parser.add_argument("--model", default="yolov8n.pt", help="Base model (yolov8n.pt or yolov8s.pt)")
+    parser.add_argument("--epochs", type=int, default=25, help="Number of training epochs")
+    parser.add_argument("--batch", type=int, default=16, help="Batch size")
+    parser.add_argument("--imgsz", type=int, default=640, help="Image resolution")
+    parser.add_argument("--device", default=None, help="Device to train on (cuda, mps, cpu)")
+    args = parser.parse_args()
 
+    # Select device: Colab GPU if available, else Apple Silicon MPS or CPU
+    if args.device:
+        device = args.device
+    elif torch.cuda.is_available():
+        device = "cuda"
+    elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+        device = "mps"
+    else:
+        device = "cpu"
 
-def train(data_yaml="data.yaml", model_size="yolov8n.pt", epochs=25, imgsz=640, batch=16, device=None):
-    if device is None:
-        device = detect_best_device()
+    print(f"Training {args.model} on device '{device}' for {args.epochs} epochs...")
 
-    print(f"Dataset config : {data_yaml}")
-    print(f"Base backbone  : {model_size}")
-    print(f"Epochs         : {epochs}")
-    print(f"Resolution     : {imgsz}x{imgsz}")
-    print(f"Batch size     : {batch}")
-    print(f"Target device  : {device}\n")
+    # Load pretrained YOLO weights
+    model = YOLO(args.model)
 
-    # Initialize model with pre-trained weights for transfer learning
-    model = YOLO(model_size)
-
-    # Launch training
-    results = model.train(
-        data=data_yaml,
-        epochs=epochs,
-        imgsz=imgsz,
-        batch=batch,
+    # Train model
+    model.train(
+        data=args.data,
+        epochs=args.epochs,
+        batch=args.batch,
+        imgsz=args.imgsz,
         device=device,
-        workers=4,
-        patience=10,        # Early stopping if no mAP improvement in 10 epochs
-        save=True,
-        project="runs/detect",
+        project="runs",
         name="road_damage_exp",
         exist_ok=True,
-        plots=True          # Generates confusion matrix, PR curves, and loss plots
+        patience=10,
+        plots=True
     )
 
-    # Save best checkpoint and key evaluation curves
+    # Copy best weights to models/
     os.makedirs("models", exist_ok=True)
+    best_weights = "runs/road_damage_exp/weights/best.pt"
+    if os.path.exists(best_weights):
+        shutil.copy(best_weights, "models/best.pt")
+        print("Copied best model weights to models/best.pt")
+
+    # Copy plots to results/screenshots if present
     os.makedirs("results/screenshots", exist_ok=True)
-
-    possible_weight_dirs = [
-        "runs/detect/road_damage_exp/weights",
-        "runs/detect/runs/detect/road_damage_exp/weights"
-    ]
-    for wdir in possible_weight_dirs:
-        best_candidate = os.path.join(wdir, "best.pt")
-        if os.path.exists(best_candidate):
-            shutil.copy(best_candidate, "models/best.pt")
-            print("Successfully saved best weights to: models/best.pt")
-
-            exp_parent = os.path.dirname(wdir)
-            for f in os.listdir(exp_parent):
-                if f.endswith(".png"):
-                    shutil.copy(os.path.join(exp_parent, f), os.path.join("results/screenshots", f))
-            print("Saved training metrics and performance curves to: results/screenshots/")
-            break
-
-    return results
+    run_dir = "runs/road_damage_exp"
+    if os.path.exists(run_dir):
+        for f in os.listdir(run_dir):
+            if f.endswith(".png"):
+                shutil.copy(os.path.join(run_dir, f), os.path.join("results/screenshots", f))
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Train YOLOv8 Road Damage Model")
-    parser.add_argument("--data", type=str, default="data.yaml", help="Path to data.yaml")
-    parser.add_argument("--model", type=str, default="yolov8n.pt", help="Pretrained weights: yolov8n.pt, yolov8s.pt")
-    parser.add_argument("--epochs", type=int, default=25, help="Number of training epochs")
-    parser.add_argument("--imgsz", type=int, default=640, help="Image dimension")
-    parser.add_argument("--batch", type=int, default=16, help="Batch size")
-    parser.add_argument("--device", type=str, default=None, help="Device: '0', 'cpu', 'mps'")
-
-    args = parser.parse_args()
-    train(
-        data_yaml=args.data,
-        model_size=args.model,
-        epochs=args.epochs,
-        imgsz=args.imgsz,
-        batch=args.batch,
-        device=args.device
-    )
+    main()
