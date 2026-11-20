@@ -44,3 +44,4 @@ runs/
 !results/screenshots/.gitkeep
 !demo_samples/*.jpg
 id_ed25519*
+results/inspection_log.csv
