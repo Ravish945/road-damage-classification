@@ -15,6 +15,7 @@ st.write("Upload a road photo or pick a sample image to detect potholes and crac
 st.sidebar.header("Settings")
 model_path = st.sidebar.text_input("Model weights", "models/best.pt")
 conf_thresh = st.sidebar.slider("Confidence threshold", 0.1, 0.9, 0.25, 0.05)
+st.sidebar.caption("Recommended: 0.25 for balanced detection")
 
 # Load model with proper Streamlit caching
 @st.cache_resource
@@ -37,7 +38,9 @@ image_name = "test.jpg"
 if source_type == "Demo Sample":
     sample_files = sorted(glob.glob("demo_samples/*.jpg"))
     if sample_files:
-        chosen = st.selectbox("Select sample image:", [os.path.basename(f) for f in sample_files])
+        options = [os.path.basename(f) for f in sample_files]
+        default_idx = options.index("India_000389.jpg") if "India_000389.jpg" in options else 0
+        chosen = st.selectbox("Select sample image:", options, index=default_idx)
         image_path = os.path.join("demo_samples", chosen)
         image = Image.open(image_path)
         image_name = chosen
