@@ -1,0 +1,46 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Virtual environments
+venv/
+env/
+.env/
+
+# Large Datasets (Do NOT upload gigabytes of images to GitHub)
+train/
+test/
+raw_data/
+dataset/images/
+dataset/labels/
+*.zip
+*.tar.gz
+
+# Model weights and checkpoints (Large files > 100MB)
+models/*.pt
+models/*.pth
+models/*.onnx
+*.pt
+*.pth
+
+# YOLO training runs and logs
+runs/
+.ipynb_checkpoints/
+
+# Keep empty folder structures in repo
+!dataset/.gitkeep
+!models/.gitkeep
+!results/.gitkeep
+!results/screenshots/.gitkeep
+!demo_samples/*.jpg
+id_ed25519*
