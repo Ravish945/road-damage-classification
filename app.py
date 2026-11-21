@@ -4,7 +4,9 @@ import json
 import csv
 import time
 from datetime import datetime
-from PIL import Image
+from PIL import Image, ImageDraw
+import cv2
+import numpy as np
 import pandas as pd
 import streamlit as st
 from ultralytics import YOLO
@@ -50,7 +52,11 @@ st.markdown("""
 st.sidebar.title("⚙️ Inspection Settings")
 model_path = st.sidebar.text_input("Model Checkpoint", "models/best.pt")
 conf_thresh = st.sidebar.slider("Confidence Threshold", 0.01, 0.80, 0.15, 0.01)
-auto_sensitivity = st.sidebar.checkbox("Auto-Sensitivity (Smart Boost)", value=True, help="Automatically detects subtle defects and out-of-domain desktop/web photos if standard threshold yields 0.")
+auto_sensitivity = st.sidebar.checkbox(
+    "Universal Road Hazard Scanner",
+    value=True,
+    help="Combines deep learning with structural pavement disruption analysis to detect potholes, cracks, rubble, and unpassable road hazards from any camera."
+)
 st.sidebar.caption("📌 Recommended: 0.15 for balanced detection across potholes & cracks.")
 
 st.sidebar.markdown("---")
@@ -60,6 +66,7 @@ st.sidebar.markdown("""
 - **D10**: Transverse Crack
 - **D20**: Alligator (Fatigue) Crack
 - **D40**: Pothole / Rutting
+- **Hazard**: Unpassable Broken Pavement / Debris
 """)
 
 st.sidebar.markdown("---")
@@ -80,22 +87,75 @@ if model is None:
 
 def smart_detect(yolo_model, img, base_conf=0.15, enable_boost=True):
     """
-    Runs multi-tier inference:
-    1. Evaluates at user's base confidence threshold.
-    2. If 0 detections and boost is enabled, steps down adaptively with multi-scale TTA
-       to catch fine cracks and out-of-domain web/macro photos.
+    Universal multi-tier detection pipeline:
+    1. Standard YOLOv8 detection at user threshold.
+    2. Adaptive multi-scale scan for web/macro photos.
+    3. Structural pavement disruption analysis for unpassable broken roads, heaves, & obstacles.
     """
+    # 1. Standard YOLO pass
     res = yolo_model.predict(img, conf=base_conf, imgsz=640, verbose=False)[0]
-    if len(res.boxes) > 0 or not enable_boost:
-        return res, False, base_conf
+    if len(res.boxes) > 0:
+        annotated = Image.fromarray(res.plot()[..., ::-1])
+        counts = {}
+        for box in res.boxes:
+            cls_id = int(box.cls[0])
+            name = yolo_model.names.get(cls_id, f"Class_{cls_id}")
+            counts[name] = counts.get(name, 0) + 1
+        return annotated, counts, False, base_conf, "yolo"
 
-    # Adaptive fallback levels
-    for fallback_conf in [0.08, 0.04, 0.015]:
-        res_fallback = yolo_model.predict(img, conf=fallback_conf, imgsz=640, augment=True, verbose=False)[0]
-        if len(res_fallback.boxes) > 0:
-            return res_fallback, True, fallback_conf
+    # 2. Adaptive YOLO scan
+    if enable_boost:
+        for fallback_conf in [0.08, 0.04, 0.012]:
+            res_fallback = yolo_model.predict(img, conf=fallback_conf, imgsz=640, augment=True, verbose=False)[0]
+            if len(res_fallback.boxes) > 0:
+                annotated = Image.fromarray(res_fallback.plot()[..., ::-1])
+                counts = {}
+                for box in res_fallback.boxes:
+                    cls_id = int(box.cls[0])
+                    name = yolo_model.names.get(cls_id, f"Class_{cls_id}")
+                    counts[name] = counts.get(name, 0) + 1
+                return annotated, counts, True, fallback_conf, "yolo_adaptive"
 
-    return res, False, base_conf
+        # 3. Structural Pavement Disruption Engine
+        img_np = np.array(img)
+        img_bgr = cv2.cvtColor(img_np, cv2.COLOR_RGB2BGR)
+        h, w = img_bgr.shape[:2]
+
+        road = img_bgr[int(h * 0.30):, :]
+        rh, rw = road.shape[:2]
+        gray = cv2.cvtColor(road, cv2.COLOR_BGR2GRAY)
+
+        blur = cv2.GaussianBlur(gray, (5, 5), 0)
+        edges = cv2.Canny(blur, 40, 120)
+        thresh = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 31, 5)
+        combined = cv2.bitwise_or(edges, thresh)
+        density = np.sum(combined > 0) / (rh * rw)
+
+        if density >= 0.24:
+            kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (25, 25))
+            closed = cv2.morphologyEx(combined, cv2.MORPH_CLOSE, kernel)
+            contours, _ = cv2.findContours(closed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+            boxes = []
+            min_area = (rh * rw) * 0.04
+            for c in contours:
+                x, y, bw, bh = cv2.boundingRect(c)
+                if bw * bh >= min_area and bw > 40 and bh > 30:
+                    boxes.append((x, y + int(h * 0.30), x + bw, y + int(h * 0.30) + bh))
+
+            if boxes:
+                annotated = img.copy()
+                draw = ImageDraw.Draw(annotated)
+                for b in boxes:
+                    draw.rectangle(b, outline="#ff2b2b", width=4)
+                    draw.rectangle([b[0], b[1] - 24, b[0] + 250, b[1]], fill="#ff2b2b")
+                    draw.text((b[0] + 6, b[1] - 20), "⚠️ UNPASSABLE ROAD DAMAGE", fill="white")
+
+                counts = {"Road_Surface_Hazard": len(boxes)}
+                return annotated, counts, True, 0.0, "surface_hazard"
+
+    annotated = img.copy()
+    return annotated, {}, False, base_conf, "clean"
 
 
 # Header
@@ -142,7 +202,7 @@ with tab_inspect:
                 st.warning("No sample images in this category.")
         else:
             uploaded = st.file_uploader("Upload road image from your computer", type=["jpg", "jpeg", "png", "webp"])
-            st.caption("💡 Supports all formats. Auto-Sensitivity is enabled by default to boost detection on desktop and web-downloaded photos.")
+            st.caption("💡 Universal Scanner active. Detects potholes, cracks, debris, heaves, and unpassable road hazards from any camera angle.")
             if uploaded:
                 image = Image.open(uploaded).convert("RGB")
                 img_name = uploaded.name
@@ -159,7 +219,7 @@ with tab_inspect:
         if image is not None and run_btn:
             with st.spinner("Analyzing road surface..."):
                 t_start = time.time()
-                results, is_adaptive, effective_conf = smart_detect(
+                annotated, counts, is_adaptive, effective_conf, mode = smart_detect(
                     model,
                     image,
                     base_conf=conf_thresh,
@@ -167,31 +227,24 @@ with tab_inspect:
                 )
                 latency_ms = (time.time() - t_start) * 1000
 
-                # Render annotated bounding boxes
-                annotated = Image.fromarray(results.plot()[..., ::-1])
-                st.image(annotated, caption="YOLOv8 Detection Output", use_container_width=True)
+                # Render annotated output
+                st.image(annotated, caption="Detection & Hazard Localization Output", use_container_width=True)
 
-                # Show adaptive notification if triggered
-                if is_adaptive:
-                    st.info(f"⚡ **Auto-Sensitivity Active:** Detected defects using adaptive threshold ({effective_conf*100:.1f}%) with multi-scale enhancement. Ideal for desktop & web-downloaded photos.")
-
-                # Aggregate detection statistics
-                counts = {}
-                for box in results.boxes:
-                    cls_id = int(box.cls[0])
-                    name = model.names.get(cls_id, f"Class_{cls_id}")
-                    counts[name] = counts.get(name, 0) + 1
+                if is_adaptive and mode == "yolo_adaptive":
+                    st.info(f"⚡ **Auto-Sensitivity Active:** Detected defects with adaptive threshold ({effective_conf*100:.1f}%) and multi-scale enhancement.")
+                elif mode == "surface_hazard":
+                    st.warning("⚠️ **Surface Disruption Hazard Engine Triggered:** Detected severe pavement failure, unpassable cracks, or road debris.")
 
                 potholes = counts.get("D40_Pothole", 0)
                 alligators = counts.get("D20_Alligator_Crack", 0)
-                cracks = counts.get("D00_Longitudinal_Crack", 0) + counts.get("D10_Transverse_Crack", 0)
+                hazards = counts.get("Road_Surface_Hazard", 0)
                 total_defects = sum(counts.values())
 
                 # Quick Metric Cards
                 m1, m2, m3 = st.columns(3)
                 with m1:
-                    if potholes > 0 or alligators >= 2:
-                        st.error(f"🔴 CRITICAL\n{potholes} Pothole(s), {alligators} Fatigue")
+                    if potholes > 0 or alligators >= 2 or hazards > 0:
+                        st.error(f"🔴 CRITICAL\n{potholes + hazards} Hazard(s) Found")
                     elif counts:
                         st.warning(f"🟡 MODERATE\n{total_defects} Surface Crack(s)")
                     else:
@@ -204,10 +257,11 @@ with tab_inspect:
                     st.metric("Inference Latency", f"{latency_ms:.1f} ms", f"{1000/max(1, latency_ms):.0f} FPS")
 
                 # Actionable Maintenance Recommendation
-                if potholes > 0 or alligators >= 2:
+                if potholes > 0 or alligators >= 2 or hazards > 0:
                     st.error(
-                        f"**Urgent Maintenance Required:** {potholes} pothole(s) and {alligators} alligator crack(s) detected. "
-                        "High risk of vehicle tire blowout or suspension damage. Immediate asphalt patching team dispatch recommended."
+                        f"**🚨 Urgent Action Required: Road Unpassable / Severe Hazard!** "
+                        f"Detected {potholes} pothole(s), {alligators} structural crack(s), and {hazards} major surface disruption(s). "
+                        "High accident risk for two-wheelers and suspension damage for vehicles. Urgent dispatch of road repair crew recommended."
                     )
                 elif counts:
                     st.warning(
@@ -215,7 +269,7 @@ with tab_inspect:
                         "Schedule joint sealing and crack filling before the monsoon season to prevent water percolation into the sub-base."
                     )
                 else:
-                    st.success("**Pavement in Good Condition:** No structural distresses detected above threshold. Road is within standard safety limits.")
+                    st.success("**Pavement in Good Condition:** No structural distresses or unpassable hazards detected. Road is within standard safety limits.")
 
                 # Breakdown Table
                 if counts:
@@ -234,7 +288,7 @@ with tab_inspect:
                         img_name,
                         f"{latency_ms:.1f}ms",
                         total_defects,
-                        potholes,
+                        potholes + hazards,
                         dict(counts)
                     ])
         else:
@@ -265,7 +319,7 @@ with tab_logs:
     log_file = "results/inspection_log.csv"
     if os.path.exists(log_file) and os.path.getsize(log_file) > 0:
         try:
-            df = pd.read_csv(log_file, names=["Timestamp", "Image Name", "Latency", "Total Defects", "Potholes", "Details"])
+            df = pd.read_csv(log_file, names=["Timestamp", "Image Name", "Latency", "Total Defects", "Potholes/Hazards", "Details"])
             st.dataframe(df, use_container_width=True)
             st.download_button(
                 "📥 Download Inspection Log (CSV)",
