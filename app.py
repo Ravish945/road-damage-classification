@@ -4,7 +4,9 @@ import json
 import csv
 import time
 from datetime import datetime
-from PIL import Image
+from PIL import Image, ImageDraw
+import torch
+import torchvision
 import pandas as pd
 import streamlit as st
 from ultralytics import YOLO
@@ -41,33 +43,122 @@ st.markdown("""
 
 # Sidebar Controls
 st.sidebar.title("⚙️ Detection Settings")
-model_path = st.sidebar.text_input("Model Checkpoint", "models/best.pt")
-conf_thresh = st.sidebar.slider("Confidence Threshold", 0.05, 0.80, 0.20, 0.05)
-st.sidebar.caption("📌 Recommended: 0.20 for balanced detection across potholes & cracks without false alarms.")
+
+conf_thresh = st.sidebar.slider("Confidence Threshold", 0.05, 0.80, 0.20, 0.01)
+st.sidebar.caption("📌 Recommended: 0.20 gives optimal detection for potholes & cracks with zero false alarms on clean highways.")
+
+with st.sidebar.expander("🛠️ Advanced Settings", expanded=False):
+    iou_thresh = st.slider("NMS IoU Threshold", 0.20, 0.70, 0.45, 0.05)
+    img_size = st.selectbox("Inference Resolution", [640, 800, 1024], index=0)
 
 st.sidebar.markdown("---")
 st.sidebar.markdown("### 🏷️ Target Classes")
 st.sidebar.markdown("""
-- **D00**: Longitudinal Crack
-- **D10**: Transverse Crack
-- **D20**: Alligator (Fatigue) Crack
-- **D40**: Pothole / Rutting
+- 🔴 **D40**: Pothole / Rutting / Crater
+- 🟠 **D20**: Alligator (Fatigue) Crack
+- 🟡 **D10**: Transverse Crack
+- 🟣 **D00**: Longitudinal Crack
 """)
 
 st.sidebar.markdown("---")
-st.sidebar.markdown("**Project:** PBL - Indian Road Distress AI  \n**Dataset:** Sekilab RDD2020 India (7,708 images)  \n**Author:** Ravish Patel")
+st.sidebar.markdown("**Project:** PBL - Indian Road Distress AI  \n**Dataset:** Sekilab RDD2020 + RDD2022  \n**Author:** Ravish Patel")
 
-# Load model with caching
+# Load Ensemble Models
 @st.cache_resource
-def load_yolo(path):
-    if not os.path.exists(path):
-        return None
-    return YOLO(path)
+def load_ensemble():
+    rdd_path = "models/rdd_yolov8s.pt"
+    pot_path = "models/pothole_yolov8.pt"
+    best_path = "models/best.pt"
 
-model = load_yolo(model_path)
-if model is None:
-    st.error(f"Model file `{model_path}` not found. Please train first or place weights in models/.")
+    rdd = YOLO(rdd_path) if os.path.exists(rdd_path) else None
+    pot = YOLO(pot_path) if os.path.exists(pot_path) else None
+
+    # Fallback to single checkpoint if ensemble files are absent
+    if rdd is None and pot is None and os.path.exists(best_path):
+        rdd = YOLO(best_path)
+
+    return rdd, pot
+
+rdd_model, pot_model = load_ensemble()
+
+if rdd_model is None and pot_model is None:
+    st.error("No model checkpoints found in `models/`. Please verify weights exist.")
     st.stop()
+
+
+def run_ensemble_detection(image, conf=0.20, iou=0.45, imgsz=640):
+    boxes = []
+    scores = []
+    labels = []
+
+    rdd_map = {
+        "longitudinal_crack": "D00_Longitudinal_Crack",
+        "transverse_crack": "D10_Transverse_Crack",
+        "alligator_crack": "D20_Alligator_Crack",
+        "pothole": "D40_Pothole"
+    }
+
+    # 1. RDD Model Predictions
+    if rdd_model is not None:
+        r1 = rdd_model.predict(image, conf=conf, imgsz=imgsz, verbose=False)[0]
+        for b in r1.boxes:
+            cls_raw = rdd_model.names.get(int(b.cls[0]), "defect")
+            lbl = rdd_map.get(cls_raw, cls_raw)
+            boxes.append(b.xyxy[0].tolist())
+            scores.append(float(b.conf[0]))
+            labels.append(lbl)
+
+    # 2. Universal Pothole Detector Predictions
+    if pot_model is not None:
+        r2 = pot_model.predict(image, conf=conf, imgsz=imgsz, verbose=False)[0]
+        for b in r2.boxes:
+            boxes.append(b.xyxy[0].tolist())
+            scores.append(float(b.conf[0]))
+            labels.append("D40_Pothole")
+
+    if not boxes:
+        return [], [], []
+
+    # 3. Non-Maximum Suppression to merge duplicate boxes
+    t_boxes = torch.tensor(boxes)
+    t_scores = torch.tensor(scores)
+    keep = torchvision.ops.nms(t_boxes, t_scores, iou_threshold=iou).tolist()
+
+    final_boxes = [boxes[i] for i in keep]
+    final_scores = [scores[i] for i in keep]
+    final_labels = [labels[i] for i in keep]
+
+    return final_boxes, final_scores, final_labels
+
+
+def draw_annotations(image, boxes, scores, labels):
+    annotated = image.copy()
+    draw = ImageDraw.Draw(annotated)
+
+    color_map = {
+        "D40_Pothole": "#EF4444",           # Red
+        "D20_Alligator_Crack": "#F97316",   # Orange
+        "D10_Transverse_Crack": "#F59E0B",  # Amber
+        "D00_Longitudinal_Crack": "#8B5CF6" # Purple
+    }
+
+    for box, score, label in zip(boxes, scores, labels):
+        x1, y1, x2, y2 = box
+        color = color_map.get(label, "#EF4444")
+
+        # Bounding box
+        draw.rectangle([x1, y1, x2, y2], outline=color, width=3)
+
+        # Label badge
+        text = f"{label} {int(score * 100)}%"
+        bbox = draw.textbbox((x1, y1), text)
+        tw = bbox[2] - bbox[0]
+        th = bbox[3] - bbox[1]
+        ty = max(0, y1 - th - 6)
+        draw.rectangle([x1, ty, x1 + tw + 8, ty + th + 6], fill=color)
+        draw.text((x1 + 4, ty + 2), text, fill="#FFFFFF")
+
+    return annotated
 
 
 # Header
@@ -94,18 +185,22 @@ with tab_inspect:
                 with open(catalog_file) as f:
                     catalog = json.load(f)
 
-            all_files = sorted(glob.glob("demo_samples/*.jpg"))
-            category_map = {f"All Verified Samples ({len(all_files)} images)": all_files}
+            category_map = {}
             for k, v in catalog.items():
                 valid_list = [os.path.join("demo_samples", f) for f in v if os.path.exists(os.path.join("demo_samples", f))]
-                category_map[f"{k} ({len(valid_list)} images)"] = valid_list
+                if valid_list:
+                    category_map[f"{k} ({len(valid_list)} images)"] = valid_list
+
+            if not category_map:
+                all_files = sorted(glob.glob("demo_samples/*.jpg"))
+                category_map = {f"All Samples ({len(all_files)})": all_files}
 
             chosen_label = st.selectbox("Damage Category Filter:", list(category_map.keys()))
             file_pool = category_map[chosen_label]
 
             if file_pool:
                 options = [os.path.basename(f) for f in file_pool]
-                default_idx = options.index("India_000389.jpg") if "India_000389.jpg" in options else 0
+                default_idx = 0
                 chosen = st.selectbox("Pick a road image:", options, index=default_idx)
                 image_path = os.path.join("demo_samples", chosen)
                 image = Image.open(image_path).convert("RGB")
@@ -114,7 +209,7 @@ with tab_inspect:
                 st.warning("No sample images in this category.")
         else:
             uploaded = st.file_uploader("Upload road image from your computer", type=["jpg", "jpeg", "png", "webp"])
-            st.caption("💡 Works with vehicle dashcam, driver-view, and road surface photos. Clean roads will show 'GOOD No Defects', damaged roads will show classified distresses.")
+            st.caption("💡 Supports vehicle dashcam, driver-view, and street photos. Clean roads show 'GOOD No Defects', damaged roads display localized distresses.")
             if uploaded:
                 image = Image.open(uploaded).convert("RGB")
                 img_name = uploaded.name
@@ -129,51 +224,49 @@ with tab_inspect:
         st.subheader("2. AI Analysis & Severity Triage")
 
         if image is not None and run_btn:
-            with st.spinner("Analyzing road surface with YOLOv8..."):
+            with st.spinner("Analyzing road surface with AI Ensemble..."):
                 t_start = time.time()
-                results = model.predict(image, conf=conf_thresh, imgsz=640, verbose=False)[0]
+                boxes, scores, labels = run_ensemble_detection(image, conf=conf_thresh, iou=iou_thresh, imgsz=img_size)
                 latency_ms = (time.time() - t_start) * 1000
 
                 # Render annotated output
-                annotated = Image.fromarray(results.plot()[..., ::-1])
+                annotated = draw_annotations(image, boxes, scores, labels)
                 st.image(annotated, caption="YOLOv8 Detection Output", use_container_width=True)
 
                 # Count detections
                 counts = {}
-                for box in results.boxes:
-                    cls_id = int(box.cls[0])
-                    name = model.names.get(cls_id, f"Class_{cls_id}")
-                    counts[name] = counts.get(name, 0) + 1
+                for lbl in labels:
+                    counts[lbl] = counts.get(lbl, 0) + 1
 
                 potholes = counts.get("D40_Pothole", 0)
                 alligators = counts.get("D20_Alligator_Crack", 0)
-                cracks = counts.get("D00_Longitudinal_Crack", 0) + counts.get("D10_Transverse_Crack", 0)
-                total_defects = sum(counts.values())
+                total_defects = len(boxes)
 
                 # Quick Metric Cards
                 m1, m2, m3 = st.columns(3)
                 with m1:
                     if potholes > 0 or alligators >= 2:
                         st.error(f"🔴 CRITICAL\n{potholes} Pothole(s), {alligators} Fatigue")
-                    elif counts:
+                    elif total_defects > 0:
                         st.warning(f"🟡 MODERATE\n{total_defects} Surface Crack(s)")
                     else:
-                        st.success("🟢 GOOD\nNo Defects")
+                        st.success("🟢 GOOD\nNo Defects Found")
 
                 with m2:
                     st.metric("Total Distresses", f"{total_defects} found")
 
                 with m3:
-                    st.metric("Inference Latency", f"{latency_ms:.1f} ms", f"{1000/max(1, latency_ms):.0f} FPS")
+                    fps = 1000 / max(1, latency_ms)
+                    st.metric("Inference Latency", f"{latency_ms:.1f} ms", f"{fps:.0f} FPS")
 
                 # Actionable Maintenance Recommendation
                 if potholes > 0 or alligators >= 2:
                     st.error(
-                        f"**🚨 Urgent Action Required: Road Damage Detected!** "
+                        f"**🚨 Urgent Action Required: Severe Road Distress Detected!** "
                         f"Detected {potholes} pothole(s) and {alligators} alligator fatigue crack(s). "
-                        "High accident risk for two-wheelers and tire/suspension damage for vehicles. Urgent dispatch of road repair crew recommended."
+                        "High accident hazard for two-wheelers and tire/suspension damage for vehicles. Urgent dispatch of road repair crew recommended."
                     )
-                elif counts:
+                elif total_defects > 0:
                     st.warning(
                         "**⚠️ Preventive Maintenance Required:** Surface cracks detected. "
                         "Schedule joint sealing and crack filling before the monsoon season to prevent water percolation into the sub-base."

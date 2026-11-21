@@ -36,6 +36,8 @@ models/*.onnx
 # YOLO training runs and logs
 runs/
 .ipynb_checkpoints/
+extracted_tests/
+test_crops/
 
 # Keep empty folder structures in repo
 !dataset/.gitkeep
