@@ -122,13 +122,14 @@ with tab_inspect:
                 with open(catalog_file) as f:
                     catalog = json.load(f)
 
-            cat_options = ["All Verified Samples"] + list(catalog.keys())
-            chosen_cat = st.selectbox("Damage Category Filter:", cat_options)
+            all_files = sorted(glob.glob("demo_samples/*.jpg"))
+            category_map = {f"All Verified Samples ({len(all_files)} images)": all_files}
+            for k, v in catalog.items():
+                valid_list = [os.path.join("demo_samples", f) for f in v if os.path.exists(os.path.join("demo_samples", f))]
+                category_map[f"{k} ({len(valid_list)} images)"] = valid_list
 
-            if chosen_cat == "All Verified Samples" or chosen_cat not in catalog:
-                file_pool = sorted(glob.glob("demo_samples/*.jpg"))
-            else:
-                file_pool = [os.path.join("demo_samples", f) for f in catalog[chosen_cat] if os.path.exists(os.path.join("demo_samples", f))]
+            chosen_label = st.selectbox("Damage Category Filter:", list(category_map.keys()))
+            file_pool = category_map[chosen_label]
 
             if file_pool:
                 options = [os.path.basename(f) for f in file_pool]
