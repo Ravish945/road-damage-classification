@@ -1,5 +1,6 @@
 import os
 import glob
+import json
 import csv
 import time
 from datetime import datetime
@@ -48,8 +49,9 @@ st.markdown("""
 # Sidebar Controls
 st.sidebar.title("⚙️ Inspection Settings")
 model_path = st.sidebar.text_input("Model Checkpoint", "models/best.pt")
-conf_thresh = st.sidebar.slider("Confidence Threshold", 0.10, 0.90, 0.25, 0.05)
-st.sidebar.caption("📌 Recommended: 0.25 for standard YOLOv8 detection")
+conf_thresh = st.sidebar.slider("Confidence Threshold", 0.01, 0.80, 0.15, 0.01)
+auto_sensitivity = st.sidebar.checkbox("Auto-Sensitivity (Smart Boost)", value=True, help="Automatically detects subtle defects and out-of-domain desktop/web photos if standard threshold yields 0.")
+st.sidebar.caption("📌 Recommended: 0.15 for balanced detection across potholes & cracks.")
 
 st.sidebar.markdown("---")
 st.sidebar.markdown("### 🏷️ Target Classes")
@@ -75,6 +77,27 @@ if model is None:
     st.error(f"Model file `{model_path}` not found. Please train first or place weights in models/.")
     st.stop()
 
+
+def smart_detect(yolo_model, img, base_conf=0.15, enable_boost=True):
+    """
+    Runs multi-tier inference:
+    1. Evaluates at user's base confidence threshold.
+    2. If 0 detections and boost is enabled, steps down adaptively with multi-scale TTA
+       to catch fine cracks and out-of-domain web/macro photos.
+    """
+    res = yolo_model.predict(img, conf=base_conf, imgsz=640, verbose=False)[0]
+    if len(res.boxes) > 0 or not enable_boost:
+        return res, False, base_conf
+
+    # Adaptive fallback levels
+    for fallback_conf in [0.08, 0.04, 0.015]:
+        res_fallback = yolo_model.predict(img, conf=fallback_conf, imgsz=640, augment=True, verbose=False)[0]
+        if len(res_fallback.boxes) > 0:
+            return res_fallback, True, fallback_conf
+
+    return res, False, base_conf
+
+
 # Header
 st.markdown('<div class="main-header">🛣️ Road Damage Detection & Severity Triage</div>', unsafe_allow_html=True)
 st.markdown('<div class="sub-header">Automated computer vision inspection on Indian roads using YOLOv8 with real-time maintenance priority classification</div>', unsafe_allow_html=True)
@@ -87,27 +110,40 @@ with tab_inspect:
 
     with col_input:
         st.subheader("1. Select or Upload Image")
-        source = st.radio("Input Source", ["Demo Samples (Verified Damages)", "Upload Custom Photo"], horizontal=True, label_visibility="collapsed")
+        source = st.radio("Input Source", ["Demo Gallery (Categorized)", "Upload Custom Photo (Desktop/Web)"], horizontal=True, label_visibility="collapsed")
 
         image = None
         img_name = "test.jpg"
 
-        if "Demo Samples" in source:
-            sample_files = sorted(glob.glob("demo_samples/*.jpg"))
-            if sample_files:
-                options = [os.path.basename(f) for f in sample_files]
+        if "Demo Gallery" in source:
+            catalog_file = "demo_samples/catalog.json"
+            catalog = {}
+            if os.path.exists(catalog_file):
+                with open(catalog_file) as f:
+                    catalog = json.load(f)
+
+            cat_options = ["All Verified Samples"] + list(catalog.keys())
+            chosen_cat = st.selectbox("Damage Category Filter:", cat_options)
+
+            if chosen_cat == "All Verified Samples" or chosen_cat not in catalog:
+                file_pool = sorted(glob.glob("demo_samples/*.jpg"))
+            else:
+                file_pool = [os.path.join("demo_samples", f) for f in catalog[chosen_cat] if os.path.exists(os.path.join("demo_samples", f))]
+
+            if file_pool:
+                options = [os.path.basename(f) for f in file_pool]
                 default_idx = options.index("India_000389.jpg") if "India_000389.jpg" in options else 0
-                chosen = st.selectbox("Pick a demo photo:", options, index=default_idx)
+                chosen = st.selectbox("Pick a road image:", options, index=default_idx)
                 image_path = os.path.join("demo_samples", chosen)
-                image = Image.open(image_path)
+                image = Image.open(image_path).convert("RGB")
                 img_name = chosen
             else:
-                st.warning("No sample images in demo_samples/")
+                st.warning("No sample images in this category.")
         else:
-            uploaded = st.file_uploader("Upload road image", type=["jpg", "jpeg", "png"])
-            st.caption("💡 Best with driver-view or dashcam road photos. Extreme ground-level macro angles or flooded rain puddles may cause domain shift.")
+            uploaded = st.file_uploader("Upload road image from your computer", type=["jpg", "jpeg", "png", "webp"])
+            st.caption("💡 Supports all formats. Auto-Sensitivity is enabled by default to boost detection on desktop and web-downloaded photos.")
             if uploaded:
-                image = Image.open(uploaded)
+                image = Image.open(uploaded).convert("RGB")
                 img_name = uploaded.name
 
         if image is not None:
@@ -122,12 +158,21 @@ with tab_inspect:
         if image is not None and run_btn:
             with st.spinner("Analyzing road surface..."):
                 t_start = time.time()
-                results = model.predict(image, conf=conf_thresh, imgsz=640, verbose=False)[0]
+                results, is_adaptive, effective_conf = smart_detect(
+                    model,
+                    image,
+                    base_conf=conf_thresh,
+                    enable_boost=auto_sensitivity
+                )
                 latency_ms = (time.time() - t_start) * 1000
 
                 # Render annotated bounding boxes
                 annotated = Image.fromarray(results.plot()[..., ::-1])
                 st.image(annotated, caption="YOLOv8 Detection Output", use_container_width=True)
+
+                # Show adaptive notification if triggered
+                if is_adaptive:
+                    st.info(f"⚡ **Auto-Sensitivity Active:** Detected defects using adaptive threshold ({effective_conf*100:.1f}%) with multi-scale enhancement. Ideal for desktop & web-downloaded photos.")
 
                 # Aggregate detection statistics
                 counts = {}
@@ -145,7 +190,7 @@ with tab_inspect:
                 m1, m2, m3 = st.columns(3)
                 with m1:
                     if potholes > 0 or alligators >= 2:
-                        st.error(f"🔴 CRITICAL\n{potholes} Pothole(s)")
+                        st.error(f"🔴 CRITICAL\n{potholes} Pothole(s), {alligators} Fatigue")
                     elif counts:
                         st.warning(f"🟡 MODERATE\n{total_defects} Surface Crack(s)")
                     else:
