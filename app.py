@@ -66,9 +66,28 @@ st.sidebar.markdown("**Project:** PBL - Indian Road Distress AI  \n**Dataset:** 
 # Load Ensemble Models
 @st.cache_resource
 def load_ensemble():
+    os.makedirs("models", exist_ok=True)
     rdd_path = "models/rdd_yolov8s.pt"
     pot_path = "models/pothole_yolov8.pt"
     best_path = "models/best.pt"
+
+    # Auto-download RDD weights if missing
+    if not (os.path.exists(rdd_path) and os.path.getsize(rdd_path) > 10 * 1024 * 1024):
+        try:
+            import urllib.request
+            with st.spinner("Downloading RDD road distress model weights (22 MB)..."):
+                urllib.request.urlretrieve("https://huggingface.co/dronefreak/rdd2022-yolov8s/resolve/main/best.pt", rdd_path)
+        except Exception:
+            pass
+
+    # Auto-download Pothole weights if missing
+    if not (os.path.exists(pot_path) and os.path.getsize(pot_path) > 10 * 1024 * 1024):
+        try:
+            import urllib.request
+            with st.spinner("Downloading universal pothole model weights (21 MB)..."):
+                urllib.request.urlretrieve("https://huggingface.co/peterhdd/pothole-detection-yolov8/resolve/main/best.pt", pot_path)
+        except Exception:
+            pass
 
     rdd = YOLO(rdd_path) if os.path.exists(rdd_path) else None
     pot = YOLO(pot_path) if os.path.exists(pot_path) else None

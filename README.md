@@ -81,18 +81,23 @@ Trained for 25 epochs on Google Colab (Tesla T4 GPU) using `yolov8n.pt` as the p
 ## Project Structure
 
 ```text
-├── app.py                         # Streamlit web dashboard
-├── data.yaml                      # YOLOv8 dataset config
-├── dataset/                       # Generated YOLO train/val splits
-├── demo_samples/                  # Sample test images
-├── evaluate.py                    # Validation script (mAP, Precision, Recall)
-├── models/                        # Saved weights (best.pt)
-├── predict.py                     # CLI inference script with severity rating
-├── requirements.txt               # Dependencies
-├── results/                       # Predictions & training plots
-├── Road_Damage_Detection_PBL.ipynb # Google Colab training notebook
-├── train.py                       # Training script
-└── voc_to_yolo.py                 # XML to YOLO converter
+├── app.py                             # Streamlit web dashboard with Dual-Model Ensemble
+├── download_models.py                 # Script to auto-download pretrained weights
+├── generate_docx.py                   # Script to generate Word project report
+├── Road_Damage_Detection_Project_Report.docx # Complete Seminar / Project Report (Word)
+├── Road_Damage_Detection_Project_Report.html # Complete Printable Report (HTML / PDF)
+├── Road_Damage_Detection_Project_Report.md   # Complete Report Source (Markdown)
+├── data.yaml                          # YOLOv8 dataset config
+├── dataset/                           # Generated YOLO train/val splits
+├── demo_samples/                      # Verified sample images & categorized gallery
+├── evaluate.py                        # Validation script (mAP, Precision, Recall)
+├── models/                            # Saved weights (rdd_yolov8s.pt, pothole_yolov8.pt, best.pt)
+├── predict.py                         # CLI inference script with severity rating
+├── requirements.txt                   # Dependencies
+├── results/                           # Predictions, inspection log CSV & training plots
+├── Road_Damage_Detection_PBL.ipynb     # Google Colab training notebook
+├── train.py                           # Training script
+└── voc_to_yolo.py                     # XML to YOLO converter
 ```
 
 ---
