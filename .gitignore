@@ -16,6 +16,7 @@ Thumbs.db
 venv/
 env/
 .env/
+.streamlit/
 
 # Large Datasets (Do NOT upload gigabytes of images to GitHub)
 train/

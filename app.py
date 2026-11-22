@@ -44,12 +44,17 @@ st.markdown("""
 # Sidebar Controls
 st.sidebar.title("⚙️ Detection Settings")
 
-conf_thresh = st.sidebar.slider("Confidence Threshold", 0.05, 0.80, 0.20, 0.01)
-st.sidebar.caption("📌 Recommended: 0.20 gives optimal detection for potholes & cracks with zero false alarms on clean highways.")
+conf_thresh = st.sidebar.slider("Confidence Threshold", 0.05, 0.80, 0.18, 0.01)
+st.sidebar.caption("📌 Recommended: 0.18 gives optimal detection for potholes & cracks with zero false alarms on clean highways.")
 
 with st.sidebar.expander("🛠️ Advanced Settings", expanded=False):
     iou_thresh = st.slider("NMS IoU Threshold", 0.20, 0.70, 0.45, 0.05)
     img_size = st.selectbox("Inference Resolution", [640, 800, 1024], index=0)
+    use_augmentation = st.checkbox("Multi-Angle Augmentation (TTA)", value=True, help="Enables multi-scale test-time augmentation to catch deep, flooded, or angled craters.")
+
+st.sidebar.markdown("---")
+st.sidebar.markdown("### 🤖 Active AI Models")
+st.sidebar.success("🟢 **Dual-Model AI Ensemble**\n- **RDD2022 YOLOv8s**: Cracks (D00, D10, D20)\n- **Universal Pothole Detector**: Craters (D40)")
 
 st.sidebar.markdown("---")
 st.sidebar.markdown("### 🏷️ Target Classes")
@@ -105,7 +110,8 @@ if rdd_model is None and pot_model is None:
     st.stop()
 
 
-def run_ensemble_detection(image, conf=0.20, iou=0.45, imgsz=640):
+def run_ensemble_detection(image, conf=0.18, iou=0.45, imgsz=640, augment=True):
+    w, h = image.size
     boxes = []
     scores = []
     labels = []
@@ -117,21 +123,38 @@ def run_ensemble_detection(image, conf=0.20, iou=0.45, imgsz=640):
         "pothole": "D40_Pothole"
     }
 
-    # 1. RDD Model Predictions
+    # 1. RDD Model Predictions (specialized on structural cracks)
     if rdd_model is not None:
-        r1 = rdd_model.predict(image, conf=conf, imgsz=imgsz, verbose=False)[0]
+        r1 = rdd_model.predict(image, conf=conf, imgsz=imgsz, augment=augment, verbose=False)[0]
         for b in r1.boxes:
             cls_raw = rdd_model.names.get(int(b.cls[0]), "defect")
+            # Only accept high-confidence potholes from RDD to prevent roadside foliage false alarms
+            if cls_raw == "pothole" and float(b.conf[0]) < 0.35:
+                continue
+            bx = b.xyxy[0].tolist()
+            bw, bh = bx[2] - bx[0], bx[3] - bx[1]
+            # Suppress giant whole-screen boxes
+            if bw > 0.85 * w and bh > 0.65 * h:
+                continue
+            # Suppress boxes located exclusively in the top horizon / sky / tree foliage
+            if bx[3] < 0.18 * h:
+                continue
             lbl = rdd_map.get(cls_raw, cls_raw)
-            boxes.append(b.xyxy[0].tolist())
+            boxes.append(bx)
             scores.append(float(b.conf[0]))
             labels.append(lbl)
 
-    # 2. Universal Pothole Detector Predictions
+    # 2. Universal Pothole Detector Predictions (specialized on potholes & craters)
     if pot_model is not None:
-        r2 = pot_model.predict(image, conf=conf, imgsz=imgsz, verbose=False)[0]
+        r2 = pot_model.predict(image, conf=conf, imgsz=imgsz, augment=augment, verbose=False)[0]
         for b in r2.boxes:
-            boxes.append(b.xyxy[0].tolist())
+            bx = b.xyxy[0].tolist()
+            bw, bh = bx[2] - bx[0], bx[3] - bx[1]
+            if bw > 0.85 * w and bh > 0.65 * h:
+                continue
+            if bx[3] < 0.18 * h:
+                continue
+            boxes.append(bx)
             scores.append(float(b.conf[0]))
             labels.append("D40_Pothole")
 
@@ -245,7 +268,9 @@ with tab_inspect:
         if image is not None and run_btn:
             with st.spinner("Analyzing road surface with AI Ensemble..."):
                 t_start = time.time()
-                boxes, scores, labels = run_ensemble_detection(image, conf=conf_thresh, iou=iou_thresh, imgsz=img_size)
+                boxes, scores, labels = run_ensemble_detection(
+                    image, conf=conf_thresh, iou=iou_thresh, imgsz=img_size, augment=use_augmentation
+                )
                 latency_ms = (time.time() - t_start) * 1000
 
                 # Render annotated output
