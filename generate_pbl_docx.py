@@ -605,7 +605,9 @@ def build_pbl_report_docx():
     add_table_data(doc, ["Hardware Platform", "Resolution", "Latency per Frame", "Throughput", "Operational Feasibility"], speed_table)
 
     # Embed Confusion Matrix and PR Curve if present
-    cm_path = "results/screenshots/confusion_matrix.png"
+    cm_path = "results/compressed_for_doc/confusion_matrix.jpg"
+    if not os.path.exists(cm_path):
+        cm_path = "results/screenshots/confusion_matrix.png"
     if os.path.exists(cm_path):
         doc.add_paragraph().paragraph_format.space_after = Pt(4)
         p_img = doc.add_paragraph()
@@ -617,7 +619,9 @@ def build_pbl_report_docx():
         r_cap.font.size = Pt(9.5)
         r_cap.font.italic = True
 
-    pr_path = "results/screenshots/BoxPR_curve.png"
+    pr_path = "results/compressed_for_doc/BoxPR_curve.jpg"
+    if not os.path.exists(pr_path):
+        pr_path = "results/screenshots/BoxPR_curve.png"
     if os.path.exists(pr_path):
         doc.add_paragraph().paragraph_format.space_after = Pt(4)
         p_img = doc.add_paragraph()
@@ -755,7 +759,9 @@ def build_pbl_report_docx():
     add_code_block(doc, code_ensemble)
 
     add_styled_heading(doc, "13.2 Training Loss Curves & Validation Convergence", level=2)
-    results_plot = "results/screenshots/results.png"
+    results_plot = "results/compressed_for_doc/results.jpg"
+    if not os.path.exists(results_plot):
+        results_plot = "results/screenshots/results.png"
     if os.path.exists(results_plot):
         p_img = doc.add_paragraph()
         p_img.alignment = WD_ALIGN_PARAGRAPH.CENTER
